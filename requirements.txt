@@ -1,0 +1,2 @@
+GitPython
+ansible-lint==25.12.0

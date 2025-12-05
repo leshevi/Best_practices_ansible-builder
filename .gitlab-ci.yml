@@ -1,0 +1,201 @@
+stages:
+  - 🐳build
+  - ⚒️tool creation
+  - 🛠️ansible_test
+  - 🚀deploy
+
+variables:
+  EE_IMAGE: $CI_REGISTRY_IMAGE/ansible-ee:latest
+  ANSIBLE_FORCE_COLOR: "1"
+  ANSIBLE_PYTHON_INTERPRETER: /usr/bin/python3
+  ANSIBLE_INVENTORY: inventories
+  ANSIBLE_REMOTE_TMP: /tmp
+  ANSIBLE_STARATEGY: linear
+  ANSIBLE_PIPELINING: 1
+  ANSIBLE_TRANSPORT: ssh
+  ANSIBLE_BECOME_METHOD: su
+  ANSIBLE_BECOME_USER: root
+  ANSIBLE_BECOME_ASKPASS: 'False'
+  ANSIBLE_FORCE_HANDLER: 'True'
+  CALLBACK_PLUGINS: /path/to/ansible/plugins/callback
+  ANSIBLE_ASK_PASS: 'False'
+  ANSIBLE_NOCOWS: 1
+  CALLBACK_RESULT_FORMAT: yaml
+  ANSIBLE_HOST_KEY_CHECKING: 'false'
+  ANSIBLE_BECOME_EXE: 'sudo -p "Password: " su -'
+  ANSIBLE_TIMEOUT: 30
+  ANSIBLE_ROLES_PATH: "$CI_PROJECT_DIR/roles"
+
+.build-template: &build-template
+  stage: 🐳build
+  image: docker:24
+  services:
+    - name: docker:24-dind
+      alias: docker
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"
+    DOCKER_DRIVER: overlay2
+  before_script:
+    - apk add --no-cach python3 py3-pip
+    - python3 -m venv /path/to/venv
+    - . /path/to/venv/bin/activate
+    - pip3 install ansible-builder
+    - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+
+🐳build-ee:
+  <<: *build-template
+  script:
+    - ansible-builder build -t $EE_IMAGE --container-runtime docker --verbosity 3
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker push $EE_IMAGE
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      changes:
+        - execution-environment.yml
+        - requirements.yml
+        - bindep.txt
+        - requirements.txt
+
+  tags:
+    - docker-debian
+
+image: $EE_IMAGE
+
+🔨generate_inventory:
+  stage: ⚒️tool creation
+  variables:
+    SERVER_IPS: 90.156.227.147
+    SERVER_NAMES: web-server
+  tags:
+    - docker-debian
+
+  script:
+    - rm .gitlab-ci.yml
+    - eval $(ssh-agent -s)
+    - echo "$SSH_ROOT_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - |
+      cat > hosts.yml << EOF
+      ---
+      all:
+        vars:
+          ansible_user: $SSH_USER
+      EOF
+
+      # Динамически добавляем серверы из переменных GitLab
+      SERVERS_JSON=$SERVERS  # Переменная должна содержать JSON массив серверов
+
+      if [ -n "$SERVERS_JSON" ] && [ "$SERVERS_JSON" != "null" ]; then
+        echo "  hosts:" >> hosts.yml
+
+        # Обрабатываем каждый сервер
+        jq -c '.[] | @base64' $SERVERS_JSON | while read -r encoded_server; do
+          server=$(echo "${encoded_server}" | base64 -d)
+          server_name=$(echo "$server" | jq -r ".name")
+          server_ip=$(echo "$server" | jq -r ".ip")
+
+          echo "    $server_name:" >> hosts.yml
+          echo "      ansible_host: $server_ip" >> hosts.yml
+
+        done
+      else
+        # Резервный вариант - статические серверы из переменных
+        echo "  hosts:" >> hosts.yml
+        IFS=',' read -ra SERVER_LIST <<< "$SERVER_IPS"
+        IFS=',' read -ra SERVER_NAMES <<< "$SERVER_NAMES"
+
+        for i in "${!SERVER_LIST[@]}"; do
+          server_ip="${SERVER_LIST[$i]}"
+          server_name="${SERVER_NAMES[$i]:-server$((i+1))}"
+          echo "    $server_name:" >> hosts.yml
+          echo "      ansible_host: $server_ip" >> hosts.yml
+        done
+      fi
+
+      echo "Generated hosts.yml:"
+      cat hosts.yml
+  artifacts:
+    paths:
+      - hosts.yml
+    expire_in: 1 hour
+
+⚒️download_roles:
+  stage: ⚒️tool creation
+  variables:
+    GIT_SUBMODULE_FORCE_HTTPS: "true"
+  before_script:
+    - mkdir -p $ANSIBLE_ROLES_PATH
+  tags:
+    - docker-debian
+  script:
+    - |
+      if [ -f requirements1.yml ]; then
+        echo "Installing roles from requirements.yml..."
+        ansible-galaxy install -r requirements1.yml --ignore-errors -p roles/ --force
+      else
+        echo "No requirements.yml found, creating example..."
+        cat > requirements1.yml << EOF
+        - src: 'https://oauth2:${ANSIBLE_TOKEN}@gitlab.com/ansible_playbooks7843206/traefik.git'
+          version: main
+          name: traefik
+          scm: 'git'
+        - src: 'https://oauth2:${ANSIBLE_TOKEN}@gitlab.com/ansible_playbooks7843206/docker.git'
+          version: main
+          name: docker
+          scm: 'git'
+
+      EOF
+
+        ansible-galaxy install -r requirements1.yml -p roles/ --force --ignore-errors
+      fi
+
+      echo "Installed roles:"
+      ls -la roles/
+  artifacts:
+    paths:
+      - roles/
+    expire_in: 1 hour
+
+.job_inj:
+  before_script:
+    - eval $(ssh-agent -s)
+    - echo "$SSH_ROOT_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+
+
+🛠️ansible_lint_test:
+  stage: 🛠️ansible_test
+  dependencies:
+    - 🔨generate_inventory
+    - ⚒️download_roles
+  tags:
+    - docker-debian
+  extends: .job_inj
+  script:
+    - ansible --version
+    - ansible-lint --version
+    - ansible-lint -q --offline
+    - ansible all -i hosts.yml -m ping
+
+
+🚀deploy:
+  stage: 🚀deploy
+  extends: .job_inj
+  dependencies:
+    - 🔨generate_inventory
+    - ⚒️download_roles
+    - 🛠️ansible_lint_test
+  script:
+    - |
+      echo "Current directory structure:"
+      ls -la
+
+      echo "Inventory file:"
+      cat hosts.yml
+
+      echo "Running playbook..."
+      ansible-playbook -i hosts.yml playbooks/playbook.yml --limit all
+  tags:
+    - docker-debian
+  when: manual

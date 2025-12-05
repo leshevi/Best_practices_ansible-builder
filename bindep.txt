@@ -1,0 +1,8 @@
+openssh-clients
+sshpass
+bash
+yq
+jq
+findutils
+which
+git-all

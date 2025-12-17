@@ -88,7 +88,7 @@ image: $EE_IMAGE
       SERVERS_JSON=$SERVERS  # Переменная должна содержать JSON массив серверов
 
       if [ -n "$SERVERS_JSON" ] && [ "$SERVERS_JSON" != "null" ]; then
-        echo "    children:" >> hosts.yml
+        echo "  children:" >> hosts.yml
 
         # Обрабатываем каждый сервер
         echo $(< $SERVERS_JSON) | jq -c '.[]' | while read server; do
@@ -97,13 +97,13 @@ image: $EE_IMAGE
           server_groups=$(echo "$server" | jq -r '.groups')
           server_vars=$(echo "$server" | jq -r '.vars | to_entries | map("\(.key): \(.value)") | join("\n              ")')
 
-          echo "      $server_groups:" >> hosts.yml
-          echo "        hosts:" >> hosts.yml
-          echo "          $server_name:" >> hosts.yml
-          echo "            ansible_host: $server_ip" >> hosts.yml
+          echo "    $server_groups:" >> hosts.yml
+          echo "      hosts:" >> hosts.yml
+          echo "        $server_name:" >> hosts.yml
+          echo "          ansible_host: $server_ip" >> hosts.yml
 
           if [ -n "$server_vars" ] && [ "$server_vars" != "null" ]; then
-            echo "            $server_vars" >> hosts.yml
+            echo "          $server_vars" >> hosts.yml
           fi
         done
       else

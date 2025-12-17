@@ -88,17 +88,23 @@ image: $EE_IMAGE
       SERVERS_JSON=$SERVERS  # Переменная должна содержать JSON массив серверов
 
       if [ -n "$SERVERS_JSON" ] && [ "$SERVERS_JSON" != "null" ]; then
-        echo "  hosts:" >> hosts.yml
+        echo "    children:" >> hosts.yml
 
         # Обрабатываем каждый сервер
-        jq -c '.[] | @base64' $SERVERS_JSON | while read -r encoded_server; do
-          server=$(echo "${encoded_server}" | base64 -d)
-          server_name=$(echo "$server" | jq -r ".name")
-          server_ip=$(echo "$server" | jq -r ".ip")
+        echo $(< $SERVERS_JSON) | jq -c '.[]' | while read server; do
+          server_name=$(echo "$server" | jq -r '.name')
+          server_ip=$(echo "$server" | jq -r '.ip')
+          server_groups=$(echo "$server" | jq -r '.groups')
+          server_vars=$(echo "$server" | jq -r '.vars | to_entries | map("\(.key): \(.value)") | join("\n              ")')
 
-          echo "    $server_name:" >> hosts.yml
-          echo "      ansible_host: $server_ip" >> hosts.yml
+          echo "      $server_groups:" >> hosts.yml
+          echo "        hosts:" >> hosts.yml
+          echo "          $server_name:" >> hosts.yml
+          echo "            ansible_host: $server_ip" >> hosts.yml
 
+          if [ -n "$server_vars" ] && [ "$server_vars" != "null" ]; then
+            echo "            $server_vars" >> hosts.yml
+          fi
         done
       else
         # Резервный вариант - статические серверы из переменных
